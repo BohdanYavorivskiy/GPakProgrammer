@@ -1,8 +1,9 @@
 #include "OneButton.h"
 #include <Arduino.h>
+#include <HardwareSerial.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
-#include <HardwareSerial.h>
+#include <Wire.h>
 
 /////////////////////////////////////////////////////
 #define PIN1_OUT 21
@@ -23,8 +24,13 @@
 #define ERROR -1
 #define SUCCESS 0
 
-void testAll();
-void resetAll();
+/////////////////////////////////////////////////////
+// DECLARATIONS
+
+void i2cBusCheckConnection();
+void showI2CDeviceStatuses();
+
+void showAllStatuses();
 
 /////////////////////////////////////////////////////
 // TFT
@@ -44,15 +50,147 @@ const int pwmLedChannelTFT = 0;
 OneButton button1(Btn1Io, true);
 OneButton button2(Btn2Io, true);
 
-void click1() { testAll(); }
+void click1()
+{
+  tft.fillEllipse(60, 13, 10, 10, TFT_BLUE);
+  i2cBusCheckConnection();
+  showI2CDeviceStatuses();
+}
 
-void longPressDuring1() { resetAll(); }
+void longPressDuring1()
+{
+  tft.fillEllipse(60, 13, 10, 10, TFT_GREEN);
+  showAllStatuses();
+}
 
-void click2() { testAll(); }
+void click2() { tft.fillEllipse(60, 13, 10, 10, TFT_CYAN); }
 
-void longPressDuring2() { resetAll(); }
+void longPressDuring2() { tft.fillEllipse(60, 13, 10, 10, TFT_MAGENTA); }
 
 /////////////////////////////////////////////////////
+
+uint8_t I2CDeviceStatuses[128];
+
+void i2cBusCheckConnection()
+{
+  uint8_t error, address;
+  int count = 0;
+
+  for (address = 0; address < 128; address++)
+  {
+    Wire.beginTransmission(address);
+    I2CDeviceStatuses[address] = Wire.endTransmission();
+  }
+}
+
+void showI2CDeviceStatuses()
+{
+
+  String foundI2CDev;
+  for (uint8_t address = 0; address < 128; address++)
+  {
+    if (I2CDeviceStatuses[address] == 0)
+    {
+      if (!foundI2CDev.isEmpty())
+        foundI2CDev += ", ";
+
+      foundI2CDev += String(address);
+    }
+  }
+
+  tft.drawString(foundI2CDev, 80, 3, 1);
+}
+
+/////////////////////////////////////////////////////
+uint8_t GpakDeviceStatuses[24];
+
+uint8_t devX(uint8_t devIndex)
+{
+  if (devIndex < 6)
+    return 10;
+
+  else if (devIndex < 12)
+    return 60;
+  else if (devIndex < 18)
+    return 110;
+  else
+    return 170;
+}
+
+uint8_t devY(uint8_t devIndex)
+{
+  uint8_t row = devIndex - ((devIndex / 6) * 6);
+
+  return 75 + (row * 10);
+}
+
+void showAllStatuses()
+{
+  for (uint8_t dev = 0; dev < sizeof(GpakDeviceStatuses); dev++)
+  {
+    uint16_t colour = TFT_GREEN;
+    if (dev % 3 == 0)
+      colour = TFT_RED;
+
+    tft.drawString(String(dev) + ":", devX(dev), devY(dev), 1);
+    tft.fillEllipse(devX(dev) + 25, devY(dev) + 3, 3, 3, colour);
+  }
+}
+
+/////////////////////////////////////////////////////
+
+void setup()
+{
+  Serial.begin(9600);
+  Serial.println("1231234567890-");
+
+  Wire.begin();
+
+  tft.init();
+  tft.fontHeight(2);
+  tft.setRotation(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.fillScreen(TFT_BLACK);
+  // tft.drawString("P1", 10, 3, 4);
+  // tft.drawString("P2", 10, tft.height() * 0.25 + 3, 4);
+  // tft.drawString("P3", 10, tft.height() * 0.5 + 3, 4);
+  // tft.drawString("P4", 10, tft.height() * 0.75 + 3, 4);
+
+  // img.setFreeFont(&FreeSansBold18pt7b);
+
+  // ledcSetup(pwmLedChannelTFT, pwmFreq, pwmResolution);
+  // ledcAttachPin(TFT_BL, pwmLedChannelTFT);
+  // ledcWrite(pwmLedChannelTFT,100);
+
+  /////////////////////////////////////////////////////
+
+  button1.attachClick(click1);
+  button1.attachDuringLongPress(longPressDuring1);
+
+  // link the button 2 functions.
+  button2.attachClick(click2);
+  button2.attachDuringLongPress(longPressDuring2);
+
+  /////////////////////////////////////////////////////
+}
+
+void loop()
+{
+  if (Serial.available())
+  {
+    Serial.println(Serial.read());
+    Serial.println("123");
+  }
+  // testPin(PIN1_IN, PIN1_OUT);
+  // testPin(PIN2_IN, PIN2_OUT);
+  // testPin(PIN3_IN, PIN3_OUT);
+  // testPin(PIN4_IN, PIN4_OUT);
+
+  button1.tick();
+  button2.tick();
+}
+
+/*
 
 void drawIndicator(int indicatorIndex, uint16_t color)
 {
@@ -66,7 +204,8 @@ void drawIndicator(int indicatorIndex, uint16_t color)
     tft.fillEllipse(60, tft.height() * 0.75 + 13, 10, 10, color);
 }
 
-void drawAnalogIndications(int indicatorIndex, uint16_t colorMin, int mVmin, uint16_t colorMax, int mVmax)
+void drawAnalogIndications(int indicatorIndex, uint16_t colorMin, int mVmin,
+uint16_t colorMax, int mVmax)
 {
   const uint8_t fontIndex = 2;
   tft.setTextColor(colorMin, TFT_BLACK);
@@ -165,134 +304,6 @@ int chackAllExclude(int excludePinIn, uint8_t state)
   return SUCCESS;
 }
 
-int testPin(int pinIn, int pinInA, int pinOut)
-{
-  int minmV = 9999;
-  int maxmV = -9999;
-  int errorCode = SUCCESS;
-
-  setDefaultPinmode();
-  pinMode(pinOut, OUTPUT);
-
-  for (int i = 0; i < 10; ++i)
-  {
-    if (errorCode != SUCCESS)
-      break;
-
-    drawIndicator(pinIn, i % 2 != 0 ? TFT_WHITE : TFT_BLACK);
-    delay(10);
-    for (int x = 0; x < 50; ++x)
-    {
-      const int testableState = x % 2;
-      digitalWrite(pinOut, testableState);
-      delay(1);
-      if (testableState != digitalRead(pinIn) || chackAllExclude(pinIn, HIGH) != SUCCESS)
-      {
-        errorCode = ERROR;
-        break;
-      }
-      else
-      {
-        const int mv = analogReadMilliVolts(pinInA);
-        minmV = minmV > mv ? mv : minmV;
-        maxmV = maxmV < mv ? mv : maxmV;
-      }
-    }
-  }
-
-  drawIndicator(pinIn, errorCode == SUCCESS ? TFT_GREEN : TFT_RED);
 
 
-  int percentMinmV = (minmV < 0 || minmV == 9999) ? 0 : minmV / 33; // mv / 3300 mV * 100%
-  int percentMaxmV = maxmV < 0 ? 0 : maxmV / 33;
-
-  uint16_t colorMinmV = TFT_GREEN;
-  if (percentMinmV > 30)
-    colorMinmV = TFT_YELLOW;
-  if (percentMinmV > 70)
-    colorMinmV = TFT_RED;
-
-  uint16_t colorMaxV = TFT_GREEN;
-  if (percentMaxmV < 70)
-    colorMaxV = TFT_YELLOW;
-  if (percentMaxmV < 30)
-    colorMaxV = TFT_RED;
-
-  drawAnalogIndications(pinIn, colorMinmV, percentMinmV, colorMaxV, percentMaxmV);
-  return errorCode;
-}
-
-void testAll()
-{
-  testPin(PIN1_IN, PIN1_INA, PIN1_OUT);
-  testPin(PIN2_IN, PIN2_INA, PIN2_OUT);
-  testPin(PIN3_IN, PIN3_INA, PIN3_OUT);
-  testPin(PIN4_IN, PIN4_INA, PIN4_OUT);
-}
-
-void resetVoltages()
-{
-  tft.fillRect(80, 7, 200, 15, TFT_BLACK);
-  tft.fillRect(80, tft.height() * 0.25 + 7, 200, 15, TFT_BLACK);
-  tft.fillRect(80, tft.height() * 0.5 + 7, 200, 15, TFT_BLACK);
-  tft.fillRect(80, tft.height() * 0.75 + 7, 200, 15, TFT_BLACK);
-}
-
-void resetAll()
-{
-  drawIndicator(PIN1_IN, TFT_BLACK);
-  drawIndicator(PIN2_IN, TFT_BLACK);
-  drawIndicator(PIN3_IN, TFT_BLACK);
-  drawIndicator(PIN4_IN, TFT_BLACK);
-  resetVoltages();
-}
-
-void setup()
-{
-  Serial.begin(9600);
-  Serial.println("1231234567890-");
-  tft.init();
-  tft.fontHeight(2);
-  tft.setRotation(1);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.fillScreen(TFT_BLACK);
-  tft.drawString("P1", 10, 3, 4);
-  tft.drawString("P2", 10, tft.height() * 0.25 + 3, 4);
-  tft.drawString("P3", 10, tft.height() * 0.5 + 3, 4);
-  tft.drawString("P4", 10, tft.height() * 0.75 + 3, 4);
-
-  // img.setFreeFont(&FreeSansBold18pt7b);
-
-  // ledcSetup(pwmLedChannelTFT, pwmFreq, pwmResolution);
-  // ledcAttachPin(TFT_BL, pwmLedChannelTFT);
-  // ledcWrite(pwmLedChannelTFT,100);
-
-  /////////////////////////////////////////////////////
-
-  button1.attachClick(click1);
-  button1.attachDuringLongPress(longPressDuring1);
-
-  // link the button 2 functions.
-  button2.attachClick(click2);
-  button2.attachDuringLongPress(longPressDuring2);
-
-  /////////////////////////////////////////////////////
-  setDefaultPinmode();
-}
-
-void loop()
-{
-if (Serial.available())
-{
-Serial.println(Serial.read());
-Serial.println("123");
-
-}
-  // testPin(PIN1_IN, PIN1_OUT);
-  // testPin(PIN2_IN, PIN2_OUT);
-  // testPin(PIN3_IN, PIN3_OUT);
-  // testPin(PIN4_IN, PIN4_OUT);
-
-  button1.tick();
-  button2.tick();
-}
+*/
