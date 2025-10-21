@@ -13,20 +13,31 @@
 #include <SPI.h>
 
 /////////////////////////////////////////////////////
-// #define RES_1 13
-// #define RES_2 32
-// #define RES_3 17
-// #define A_0 2
-// #define A_1 15
-// #define A_2 12
 
 #define I2C_SLAVE_ADDR 0x68
+#define I2C_BUFFER_SIZE 512
 
 #define SUCCESS 0
 #define ERROR 1
 
 #define ERROR_FILE_NOT_OPEN 11
 #define ERROR_CRC_FAIL 12
+#define ERROR_FILE_SIZE 13
+
+/////////////////////////////////////////////////////
+// DECLARATIONS
+
+void showAllStatusesTft();
+
+void runTestProcedure();
+void resetRestStates();
+
+uint8_t setI2CSlaveSelection(uint8_t devI);
+String getI2cErrDetails(uint8_t err);
+
+void setCriticalErrorState();
+
+void click3();
 
 /////////////////////////////////////////////////////
 // SD CARD
@@ -36,13 +47,14 @@
 #define SD_MISO 27
 #define SD_MOSI 26
 
-SPIClass SDSPI(HSPI);
+SPIClass SDSPI(VSPI);
 
-uint8_t Design[256];
+#define DESIGN_SIZE 256
+uint8_t testStatus = SUCCESS;
+String testStatusStr = "OK";
 
-uint8_t readFile()
+uint8_t readDesign(uint8_t *buf)
 {
-
   File binFile = SD.open("/fw.bin", FILE_READ);
   if (!binFile)
     return ERROR_FILE_NOT_OPEN;
@@ -52,45 +64,31 @@ uint8_t readFile()
 
   uint8_t err = SUCCESS;
 
-  while (binFile.available())
+  if (binFile.available() >= DESIGN_SIZE + 1)
   {
-    Design[i] = binFile.read();
-    Serial.print(String(Design[i], 16) + " ");
-    crc += Design[i];
-    ++i;
-
-    if (i == sizeof(Design))
+    binFile.read(buf, 256);
+    for (int j = 0; j < DESIGN_SIZE; ++j)
     {
-      if (binFile.available())
-      {
-        const uint8_t expCrc = binFile.read();
-        Serial.println("expCrc " + String(expCrc) + ";   crc " + String(crc & 0xFF));
-
-        if ((crc & 0xFF) == expCrc)
-          err = SUCCESS;
-        else
-          err = ERROR_CRC_FAIL;
-
-        break;
-      }
+      crc += buf[j];
+      Serial.print(String(buf[i], 16) + " ");
     }
+
+    const uint8_t expCrc = binFile.read();
+    Serial.println("expCrc " + String(expCrc) + ";   crc " + String(crc & 0xFF));
+
+    if ((crc & 0xFF) == expCrc)
+      err = SUCCESS;
+    else
+      err = ERROR_CRC_FAIL;
+  }
+  else
+  {
+    err = ERROR_FILE_SIZE;
   }
 
   binFile.close();
-
   return err;
 }
-
-/////////////////////////////////////////////////////
-// DECLARATIONS
-
-void i2cBusCheckConnection();
-void showI2CDeviceStatuses();
-
-void showAllStatusesTft();
-
-void runTestProcedure();
-void resetRestStates();
 
 /////////////////////////////////////////////////////
 // TFT
@@ -129,7 +127,7 @@ OneButton button3(Btn3Io, true);
 void click1()
 {
   Serial.println("click1");
-  runTestProcedure();
+  click3();
 }
 
 void longPressDuring1()
@@ -155,10 +153,19 @@ void click3()
   Serial.println("click3");
   static bool readyForTest = true;
   if (readyForTest)
+  {
     runTestProcedure();
-  else
-    resetRestStates();
+    if (testStatus != SUCCESS)
+    {
+      setCriticalErrorState();
 
+      tft.drawString("Err: \"" + testStatusStr + "\"                          ", 3, 20, 2);
+    }
+  }
+  else
+  {
+    resetRestStates();
+  }
   readyForTest = !readyForTest;
 }
 
@@ -168,7 +175,25 @@ void longPressDuring3()
 }
 
 /////////////////////////////////////////////////////
-// IO Expanders
+// IO Expanders, LEDs
+String getI2cErrDetails(uint8_t err)
+{
+  switch (err)
+  {
+  case 0:
+    return "Success";
+  case 1:
+    return "Data too long to fit in transmit buffer";
+  case 2:
+    return "Received NACK on transmit of address";
+  case 3:
+    return "Received NACK on transmit of data";
+  case 4:
+    return "Other error";
+  default:
+    return "Unknown error";
+  }
+}
 
 PCF8574 IoExp1_4(0x38);
 PCF8574 IoExp5_8(0x39);
@@ -177,7 +202,7 @@ PCF8574 IoExp12_16(0x3b);
 PCF8574 IoExp17_20(0x3c);
 PCF8574 IoExp21_24(0x3d);
 
-void setAllIoState(bool state)
+uint8_t setAllIoState(bool state)
 {
   if (state)
   {
@@ -197,6 +222,21 @@ void setAllIoState(bool state)
     IoExp17_20.selectNone();
     IoExp21_24.selectNone();
   }
+
+  if (IoExp1_4.lastError() != SUCCESS)
+    return ERROR;
+  if (IoExp5_8.lastError() != SUCCESS)
+    return ERROR;
+  if (IoExp9_12.lastError() != SUCCESS)
+    return ERROR;
+  if (IoExp12_16.lastError() != SUCCESS)
+    return ERROR;
+  if (IoExp17_20.lastError() != SUCCESS)
+    return ERROR;
+  if (IoExp21_24.lastError() != SUCCESS)
+    return ERROR;
+
+  return SUCCESS;
 }
 
 PCF8574 *getIoExpForDev(uint8_t devId)
@@ -223,66 +263,96 @@ enum I2cDevState
   Error
 };
 
-void clearAllLeds()
+uint8_t clearAllLeds()
 {
-  setAllIoState(false);
+  return setAllIoState(false);
 }
 
-void setLedStateFotI2cDevice(uint8_t devId, I2cDevState st)
+uint8_t setLedStateFotI2cDevice(uint8_t devId, uint8_t st)
 {
-  if (st == Success)
-    getIoExpForDev(devId)->write(((devId % 4) * 2), HIGH);
+  PCF8574 *worker = getIoExpForDev(devId);
+  if (worker == nullptr)
+    return ERROR;
+
+  if (st == SUCCESS)
+    worker->write(((devId % 4) * 2), HIGH);
   else
-    getIoExpForDev(devId)->write(((devId % 4) * 2) + 1, HIGH);
+    worker->write(((devId % 4) * 2) + 1, HIGH);
+
+  return worker->lastError();
 }
 
 /////////////////////////////////////////////////////
-
-uint8_t I2CDeviceStatuses[128];
-
-void i2cBusCheckConnection()
-{
-  uint8_t error, address;
-  int count = 0;
-
-  for (address = 0; address < 128; address++)
-  {
-    Wire.beginTransmission(address);
-    I2CDeviceStatuses[address] = Wire.endTransmission();
-  }
-}
-
-void showI2CDeviceStatuses()
-{
-
-  String foundI2CDev;
-  for (uint8_t address = 0; address < 128; address++)
-  {
-    if (I2CDeviceStatuses[address] == 0)
-    {
-      if (!foundI2CDev.isEmpty())
-        foundI2CDev += ", ";
-
-      foundI2CDev += String(address);
-    }
-  }
-
-  // tft.drawString(foundI2CDev, 80, 3, 1);
-}
-
-/////////////////////////////////////////////////////
-
+/// I2C MUXes
 #define TCA9548A_DDR 0x70 // Default I2C address of TCA9548A
-// devI
-//  x   x  |  x   x   x | x   x   x  |
-//         | a2  a1  a0 | I2C on mux |
-void selectI2cSlave(uint8_t devI)
-{
 
-  Wire.beginTransmission(TCA9548A_DDR | ((uint8_t)(((uint8_t)(devI >> 3)) & 0x07)));
-  Wire.write(1 << (devI & 0x07));
-  Wire.endTransmission();
+
+uint8_t TCA9548ASaForDevId(uint8_t devId)
+{
+  if (devId < 8)
+    return TCA9548A_DDR;
+  if (devId < 16)
+    return TCA9548A_DDR | ((uint8_t)0x04);
+  if (devId < 24)
+    return TCA9548A_DDR | ((uint8_t)0x02);
+
+  return 0;
 }
+
+uint8_t TCA9548AConfForDevId(uint8_t devId)
+{
+  return (1 << (((uint8_t)(7 - (devId % 8))) & 0x07));
+}
+
+uint8_t setI2CSlaveSelection(uint8_t devI, bool state)
+{
+  Wire.beginTransmission(TCA9548ASaForDevId(devI));
+  const uint8_t conf = state ? TCA9548AConfForDevId(devI) : 0;
+  Wire.write(conf);
+  return Wire.endTransmission();
+}
+
+uint8_t disableI2cSlaveSelectionsForIc(uint8_t IcI2CSa)
+{
+  Wire.beginTransmission(IcI2CSa);
+  Wire.write(0);
+  return Wire.endTransmission();
+}
+
+uint8_t disableI2cSlaveSelectionsForIcForce(uint8_t IcI2CSa)
+{
+  uint8_t err = SUCCESS;
+  for (uint8_t i = 0; i < 5; ++i)
+  {
+    delay(10);
+    err = disableI2cSlaveSelectionsForIc(IcI2CSa);
+
+    Serial.println("I2C MUX termination tries " + String(i) + "   I2C SA" + String(IcI2CSa, 16) + "  Err ->" + getI2cErrDetails(err));
+
+    if (err == SUCCESS)
+      return err;
+  }
+  return err;
+}
+
+uint8_t disableAllI2CSlaveSelections()
+{
+  uint8_t err = SUCCESS;
+
+  err = disableI2cSlaveSelectionsForIcForce(TCA9548A_DDR | ((uint8_t)0x00));
+  if (err != SUCCESS)
+    return err;
+
+  err = disableI2cSlaveSelectionsForIcForce(TCA9548A_DDR | ((uint8_t)0x04));
+  if (err != SUCCESS)
+    return err;
+
+  err = disableI2cSlaveSelectionsForIcForce(TCA9548A_DDR | ((uint8_t)0x02));
+  return err;
+}
+
+////////////////////////////////////////////////////////
+/// GreenPAKs
 
 uint8_t GpakDeviceStatuses[24];
 
@@ -312,16 +382,96 @@ void showAllStatusesLed()
     setLedStateFotI2cDevice(dev, (GpakDeviceStatuses[dev] == SUCCESS ? I2cDevState::Success : I2cDevState::Error));
 }
 
+void setCriticalErrorState()
+{
+  clearFullScreen();
+  cleadLogSection();
+
+  tft.drawString("CRITICAL ERROR, RESET POWER", 3, 3, 2);
+
+  for (uint8_t i = 0; i < sizeof(GpakDeviceStatuses); ++i)
+    setLedStateFotI2cDevice(i, ERROR);
+}
+
+void writeDataToAllDev(uint8_t memAddr, const uint8_t *data, size_t quantity, uint8_t displayLed, uint8_t isSecondConf)
+{
+  for (uint8_t chipI = 0; chipI < sizeof(GpakDeviceStatuses); ++chipI)
+  {
+    if (isSecondConf)
+      if (GpakDeviceStatuses[chipI] != SUCCESS)
+        continue;
+
+    // Select chip
+    testStatus = setI2CSlaveSelection(chipI, true);
+    if (testStatus != SUCCESS)
+    {
+      Serial.println("ERR MUX enable error for " + String(chipI) + "  Err ->" + getI2cErrDetails(testStatus));
+      testStatusStr = "I2C mux conf for " + String(chipI);
+      return;
+    }
+    delay(2);
+
+    // write NVM
+    Wire.beginTransmission(I2C_SLAVE_ADDR);
+    size_t transferedBytes = Wire.write(&memAddr, 1);
+    transferedBytes = Wire.write(data, quantity);
+    const uint8_t err = Wire.endTransmission();
+    Serial.println("I2C dev " + String(chipI) + +"  Err ->" + getI2cErrDetails(err) + "  Tx bytes " + String(transferedBytes));
+
+    uint8_t deviceStatus = err;
+    if (transferedBytes != quantity)
+      deviceStatus = ERROR;
+
+    GpakDeviceStatuses[chipI] = deviceStatus;
+
+    delay(2);
+
+    if (displayLed)
+    {
+      testStatus = setLedStateFotI2cDevice(chipI, GpakDeviceStatuses[chipI]);
+      if (testStatus != SUCCESS)
+      {
+        Serial.println("ERR set LED error for " + String(chipI) + "  Err ->" + getI2cErrDetails(testStatus));
+        testStatusStr = "LED conf for " + String(chipI);
+        return;
+      }
+    }
+    testStatus = setI2CSlaveSelection(chipI, false);
+    if (testStatus != 0)
+    {
+      Serial.println("ERR MUX disable error for " + String(chipI) + "  Err ->" + getI2cErrDetails(testStatus));
+      testStatusStr = "I2C mux reset for " + String(chipI);
+      return;
+    }
+  }
+}
+
 void resetRestStates()
 {
   clearFullScreen();
   cleadLogSection();
+  if (disableAllI2CSlaveSelections() != SUCCESS)
+  {
+    setCriticalErrorState();
+    return;
+  }
+
+  uint8_t err = SUCCESS;
   for (uint8_t i = 0; i < 5; ++i)
   {
-    setAllIoState(true);
+    err = setAllIoState(true);
+    if (err != SUCCESS)
+      break;
     delay(150);
-    setAllIoState(false);
+    err = setAllIoState(false);
+    if (err != SUCCESS)
+      break;
     delay(150);
+  }
+  if (err != SUCCESS)
+  {
+    setCriticalErrorState();
+    return;
   }
 
   tft.drawString("Press TEST to start", 3, 3, 2);
@@ -329,81 +479,91 @@ void resetRestStates()
 
 void runTestProcedure()
 {
+  // cleas screen
   clearFullScreen();
   cleadLogSection();
-  clearAllLeds();
+
+  // reset test terult statuses
+  for (uint8_t chipI = 0; chipI < sizeof(GpakDeviceStatuses); ++chipI)
+    GpakDeviceStatuses[chipI] = ERROR;
 
   // read file
-  uint8_t err = readFile();
-  String statusStr;
-  if (err == SUCCESS)
+  uint8_t DesignPN[DESIGN_SIZE] = {0};
+  testStatus = readDesign(DesignPN);
+
+  String statusStr = "File error - FAIL";
+  if (testStatus == SUCCESS)
     statusStr = "File read, CRC check - PASS";
-  else if (err == ERROR_CRC_FAIL)
+  if (testStatus == ERROR_CRC_FAIL)
     statusStr = "CRC check - FAIL";
-  else if (err == ERROR_FILE_NOT_OPEN)
+  if (testStatus == ERROR_FILE_NOT_OPEN)
     statusStr = "Open file - FAIL";
-  else
-    statusStr = "File error - FAIL";
+  if (testStatus == ERROR_FILE_SIZE)
+    statusStr = "File is too small - FAIL";
+  tft.drawString(statusStr, 3, 3, 2);
 
-  tft.drawString(statusStr, 3, 3, 1);
-
-  if (err != SUCCESS)
+  if (testStatus != SUCCESS)
   {
-    Serial.println("FILE error");
+    Serial.println("ERR FILE error");
+    testStatusStr = statusStr;
     return;
   }
 
-  Serial.println("Start writting");
+  const uint8_t StartMemAddr = 0x00;
+  const uint8_t ForceToEnableByteIndex = 0x72;
+  const uint8_t ForceToEnableByte = DesignPN[ForceToEnableByteIndex];
+  DesignPN[ForceToEnableByteIndex] = 0;
 
-  delay(100);
-  for (uint8_t chipI = 0; chipI < sizeof(GpakDeviceStatuses); ++chipI)
+  tft.drawString("Programming...", 3, 20, 2);
+
+  // reset LEDs
+  testStatus = clearAllLeds();
+  if (testStatus != SUCCESS)
   {
-    // Select chip
-    selectI2cSlave(chipI);
-    delay(5);
+    Serial.println("ERR reset LEDs error");
+    testStatus = ERROR;
+    testStatusStr = "LED preconfiguretion ";
+    return;
+  }
+  delay(10);
 
-    // write NVM
-    Wire.beginTransmission(I2C_SLAVE_ADDR);
-    Wire.write(Design, sizeof(Design));
-    err = Wire.endTransmission();
-    Serial.println("I2C dev " + String(chipI) + "   res " + String(err));
+  writeDataToAllDev(0, DesignPN, DESIGN_SIZE, false, false);
+  if (testStatus != SUCCESS)
+  {
+    Serial.println("ERR writeDataToAllDev DesignPN error");
+    return;
+  }
 
-    // save res for display
-    GpakDeviceStatuses[chipI] = err;
+  delay(2000);
 
-    delay(10);
-
-    // set led state
+  writeDataToAllDev(ForceToEnableByteIndex, &ForceToEnableByte, 1, true, true);
+  if (testStatus != SUCCESS)
+  {
+    Serial.println("ERR writeDataToAllDev ForceToEnableByte error");
+    return;
   }
 
   showAllStatusesTft();
   showAllStatusesLed();
+
+  tft.drawString("Programming FINISHED", 3, 20, 2);
 }
 
 /////////////////////////////////////////////////////
-
+/// SETUP
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("setup---");
 
   Wire.begin();
+  Wire.setBufferSize(I2C_BUFFER_SIZE);
 
   tft.init();
   tft.fontHeight(2);
   tft.setRotation(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.fillScreen(TFT_BLACK);
-  // tft.drawString("P1", 10, 3, 4);
-  // tft.drawString("P2", 10, tft.height() * 0.25 + 3, 4);
-  // tft.drawString("P3", 10, tft.height() * 0.5 + 3, 4);
-  // tft.drawString("P4", 10, tft.height() * 0.75 + 3, 4);
-
-  // img.setFreeFont(&FreeSansBold18pt7b);
-
-  // ledcSetup(pwmLedChannelTFT, pwmFreq, pwmResolution);
-  // ledcAttachPin(TFT_BL, pwmLedChannelTFT);
-  // ledcWrite(pwmLedChannelTFT,100);
 
   /////////////////////////////////////////////////////
 
@@ -438,16 +598,11 @@ void setup()
 
   resetRestStates();
   //////////////////////////////////////////////////////
+  Serial.println("setup finished");
 }
 
 void loop()
 {
-  if (Serial.available())
-  {
-    Serial.println(Serial.read());
-    Serial.println("123");
-  }
-
   button1.tick();
   button2.tick();
   button3.tick();
