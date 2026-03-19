@@ -275,9 +275,9 @@ uint8_t setLedStateFotI2cDevice(uint8_t devId, uint8_t st)
     return ERROR;
 
   if (st == SUCCESS)
-    worker->write(((devId % 4) * 2), HIGH);
-  else
     worker->write(((devId % 4) * 2) + 1, HIGH);
+  else
+    worker->write(((devId % 4) * 2), HIGH);
 
   return worker->lastError();
 }
@@ -356,13 +356,18 @@ uint8_t disableAllI2CSlaveSelections()
 
 uint8_t GpakDeviceStatuses[24];
 
-uint8_t devX(uint8_t devIndex) { return 10 + (devIndex / 6) * 60; }
+uint8_t devX(uint8_t devIndex) {
+  uint8_t rightLedsMove = 0;
+  if ((devIndex % 8) >= 4)
+    rightLedsMove = 25;
+
+  return 20 + ((devIndex % 8) * 25) + rightLedsMove; }
 
 uint8_t devY(uint8_t devIndex)
 {
-  uint8_t row = devIndex - ((devIndex / 6) * 6);
+  uint8_t row = (devIndex / 8);
 
-  return SCR_LOG_HEIGTH + 5 + (row * 10);
+  return SCR_LOG_HEIGTH + 10 + (row * 20);
 }
 
 void showAllStatusesTft()
@@ -370,9 +375,10 @@ void showAllStatusesTft()
   for (uint8_t dev = 0; dev < sizeof(GpakDeviceStatuses); dev++)
   {
     uint16_t colour = GpakDeviceStatuses[dev] == SUCCESS ? TFT_GREEN : TFT_RED;
+    Serial.println(String(dev) + " " + String(GpakDeviceStatuses[dev]));
 
-    tft.drawString(String(dev) + ":", devX(dev), devY(dev), 1);
-    tft.fillEllipse(devX(dev) + 25, devY(dev) + 3, 3, 3, colour);
+    // tft.drawString(String(dev) + ":", devX(dev), devY(dev), 1);
+    tft.fillEllipse(devX(dev), devY(dev), 3, 3, colour);
   }
 }
 
@@ -462,11 +468,11 @@ void resetRestStates()
     err = setAllIoState(true);
     if (err != SUCCESS)
       break;
-    delay(150);
+    delay(30);
     err = setAllIoState(false);
     if (err != SUCCESS)
       break;
-    delay(150);
+    delay(30);
   }
   if (err != SUCCESS)
   {
