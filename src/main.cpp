@@ -417,6 +417,19 @@ void writeDataToAllDev(uint8_t memAddr, const uint8_t *data, size_t quantity, ui
     }
     delay(2);
 
+    if (!isSecondConf) {
+      // write I2C Reset
+      const uint8_t i2cResetReg = 0x8b;
+      const uint8_t i2cResetVal =0x01;
+
+      Wire.beginTransmission(I2C_SLAVE_ADDR);
+      size_t transferedBytes = Wire.write(&i2cResetReg, 1);
+      transferedBytes = Wire.write(&i2cResetVal, 1);
+      const uint8_t err = Wire.endTransmission();
+      Serial.println("I2C reset dev " + String(chipI) + +"  Err ->" + getI2cErrDetails(err) + "  Tx bytes " + String(transferedBytes));
+      delay(10);
+    }
+
     // write NVM
     Wire.beginTransmission(I2C_SLAVE_ADDR);
     size_t transferedBytes = Wire.write(&memAddr, 1);
